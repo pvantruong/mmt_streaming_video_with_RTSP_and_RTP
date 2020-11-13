@@ -3,7 +3,7 @@ import tkinter.messagebox
 from tkinter import messagebox 
 from PIL import Image, ImageTk
 import socket, threading, sys, traceback, os
-
+import time
 from RtpPacket import RtpPacket
 
 CACHE_FILE_NAME = "cache-"
@@ -22,6 +22,7 @@ class Client:
 	
 	# Initiation..
 	def __init__(self, master, serveraddr, serverport, rtpport, filename):
+		self.count_loss_frame = 0
 		self.master = master
 		self.master.protocol("WM_DELETE_WINDOW", self.handler)
 		self.createWidgets()
@@ -35,7 +36,8 @@ class Client:
 		self.teardownAcked = 0
 		self.connectToServer()
 		self.frameNbr = 0
-		
+		self.total_time = 0
+		self.total_data = 0		
 	def createWidgets(self):
 		"""Build GUI."""
 		# Create Setup button
@@ -93,17 +95,20 @@ class Client:
 	
 	def listenRtp(self):		
 		"""Listen for RTP packets."""
+		start_time = time.time()
 		while True:
 			try:
 				data = self.rtpSocket.recv(20480)
+				self.total_data += len(data)
 				if data:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
 					
 					currFrameNbr = rtpPacket.seqNum()
 					print("Current Seq Num: " + str(currFrameNbr))
-										
+					print("Total loss frame: " + str(self.count_loss_frame))					
 					if currFrameNbr > self.frameNbr: # Discard the late packet
+						self.count_loss_frame += currFrameNbr - (self.frameNbr + 1)
 						self.frameNbr = currFrameNbr
 						self.updateMovie(self.writeFrame(rtpPacket.getPayload()))
 			except:
@@ -117,7 +122,15 @@ class Client:
 					self.rtpSocket.shutdown(socket.SHUT_RDWR)
 					self.rtpSocket.close()
 					break
-					
+				break
+		packet_loss_rate = float(self.count_loss_frame / self.frameNbr)
+		print("\n--> RTP Packet Loss Rate : " + str(packet_loss_rate))
+		end_time = time.time()
+		self.total_time += end_time - start_time	
+		print("Video data length: " + str(self.total_data) + " bytes")
+		print("Total time: " + str(self.total_time) + " s")	
+		print("Video data rate: " + str(self.total_data / self.total_time) + " bytes/second")
+
 	def writeFrame(self, data):
 		"""Write the received frame to a temp image file. Return the image file."""
 		cachename = CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT
@@ -225,6 +238,7 @@ class Client:
 	
 	def parseRtspReply(self, data):
 		"""Parse the RTSP reply from the server."""
+		print("\nServer reply:\n" + data)
 		lines = data.split('\n')
 		seqNum = int(lines[1].split(' ')[1])
 		
