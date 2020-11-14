@@ -1,9 +1,11 @@
+from os import set_inheritable
 from tkinter import *
 import tkinter.messagebox
 from tkinter import messagebox 
 from PIL import Image, ImageTk
 import socket, threading, sys, traceback, os
 import time
+
 from RtpPacket import RtpPacket
 
 CACHE_FILE_NAME = "cache-"
@@ -19,6 +21,7 @@ class Client:
 	PLAY = 1
 	PAUSE = 2
 	TEARDOWN = 3
+	DESCRIBE = 4
 	
 	# Initiation..
 	def __init__(self, master, serveraddr, serverport, rtpport, filename):
@@ -37,12 +40,13 @@ class Client:
 		self.connectToServer()
 		self.frameNbr = 0
 		self.total_time = 0
-		self.total_data = 0	
-
-		self.setupMovie()	
+		self.total_data = 0
+		
+		self.setupMovie()
+		
 	def createWidgets(self):
 		"""Build GUI."""
-		# Create Setup button
+		# # Create Setup button
 		# self.setup = Button(self.master, width=20, padx=3, pady=3)
 		# self.setup["text"] = "Setup"
 		# self.setup["command"] = self.setupMovie
@@ -52,24 +56,34 @@ class Client:
 		self.start = Button(self.master, width=20, padx=3, pady=3)
 		self.start["text"] = "Play"
 		self.start["command"] = self.playMovie
-		self.start.grid(row=1, column=1, padx=2, pady=2)
+		self.start.grid(row=1, column=0, padx=2, pady=2)
 		
 		# Create Pause button			
 		self.pause = Button(self.master, width=20, padx=3, pady=3)
 		self.pause["text"] = "Pause"
 		self.pause["command"] = self.pauseMovie
-		self.pause.grid(row=1, column=2, padx=2, pady=2)
+		self.pause.grid(row=1, column=1, padx=2, pady=2)
 		
 		# Create Teardown button
 		self.teardown = Button(self.master, width=20, padx=3, pady=3)
 		self.teardown["text"] = "Teardown"
 		self.teardown["command"] =  self.exitClient
+		self.teardown.grid(row=1, column=2, padx=2, pady=2)
+
+		# Create Describe button
+		self.teardown = Button(self.master, width=20, padx=3, pady=3)
+		self.teardown["text"] = "Describe"
+		self.teardown["command"] =  self.describeMediaStream
 		self.teardown.grid(row=1, column=3, padx=2, pady=2)
 		
 		# Create a label to display the movie
 		self.label = Label(self.master, height=19)
 		self.label.grid(row=0, column=0, columnspan=4, sticky=W+E+N+S, padx=5, pady=5) 
 	
+	def describeMediaStream(self):
+		"""Describe button handler."""
+		self.sendRtspRequest(self.DESCRIBE)
+
 	def setupMovie(self):
 		"""Setup button handler."""
 		if self.state == self.INIT:
@@ -77,9 +91,13 @@ class Client:
 	
 	def exitClient(self):
 		"""Teardown button handler."""
-		self.sendRtspRequest(self.TEARDOWN)		
-		self.master.destroy() # Close the gui window
-		os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Delete the cache image from video
+
+		self.sendRtspRequest(self.TEARDOWN)	
+		self.master.destroy() # Close the gui window	
+		print('-'*10 + "Wait for delete cache image" + '-'*10)
+		time.sleep(5) # đợi write xong file image cache cuối mới xóa, ko sẽ bị race condition	
+		os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Xóa file cache còn sót lại khi playing đang write file cuối
+		print('-'*20 + "Finish" + '-'*20)
 
 	def pauseMovie(self):
 		"""Pause button handler."""
@@ -100,7 +118,8 @@ class Client:
 		start_time = time.time()
 		while True:
 			try:
-				data = self.rtpSocket.recv(20480)
+				# data được nhận từ server sendto qua socket
+				data = self.rtpSocket.recv(20480) 
 				self.total_data += len(data)
 				if data:
 					rtpPacket = RtpPacket()
@@ -112,7 +131,10 @@ class Client:
 					if currFrameNbr > self.frameNbr: # Discard the late packet
 						self.count_loss_frame += currFrameNbr - (self.frameNbr + 1)
 						self.frameNbr = currFrameNbr
-						self.updateMovie(self.writeFrame(rtpPacket.getPayload()))
+						self.updateMovie(self.writeFrame(rtpPacket.getPayload())) 
+						# PLAYING -> TEARDOWN: Exception the process cannot access 
+						# the file because it is being used by another process: 'cache-[...].jpg'
+						# vì bên này đang write image cache mà bên kia teardown xóa file image cache
 			except:
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet(): 
@@ -120,7 +142,7 @@ class Client:
 				
 				# Upon receiving ACK for TEARDOWN request,
 				# close the RTP socket
-				if self.teardownAcked == 1:
+				if self.teardownAcked == 1: #??
 					self.rtpSocket.shutdown(socket.SHUT_RDWR)
 					self.rtpSocket.close()
 					break
@@ -131,7 +153,9 @@ class Client:
 		self.total_time += end_time - start_time	
 		print("Video data length: " + str(self.total_data) + " bytes")
 		print("Total time: " + str(self.total_time) + " s")	
-		print("Video data rate: " + str(self.total_data / self.total_time) + " bytes/second")
+		print("Video data rate: " + str(self.total_data / self.total_time) + " bytes/second")	
+		# self.exitClient()
+		
 
 	def writeFrame(self, data):
 		"""Write the received frame to a temp image file. Return the image file."""
@@ -156,6 +180,8 @@ class Client:
 		except:
 			messagebox.showwarning('Connection Failed', 'Connection to \'%s\' failed.' %self.serverAddr)
 	
+	# gửi request cho server 
+	# (nếu là setup thì tạo 1 thread mới để lắng nghe reply)
 	def sendRtspRequest(self, requestCode):
 		"""Send RTSP request to the server."""	
 		#-------------
@@ -215,6 +241,13 @@ class Client:
 			# Keep track of the sent request.
 			# self.requestSent = ...
 			self.requestSent = self.TEARDOWN
+		# Describe request
+		elif requestCode == self.DESCRIBE:
+			self.rtspSeq+=1
+			request = "DESCRIBE %s RTSP/1.0" % (self.fileName)
+			request+="\nCSeq: %d" % self.rtspSeq
+			request+="\nAccept: application/sdp"
+			self.requestSent = self.DESCRIBE
 		else:
 			return
 		
@@ -224,13 +257,18 @@ class Client:
 		
 		print('\nData sent:\n' + request)
 	
+	# liên tục lắng nghe reply từ phía server nếu đã được setup
 	def recvRtspReply(self):
 		"""Receive RTSP reply from the server."""
 		while True:
 			reply = self.rtspSocket.recv(1024)
 			
 			if reply: 
-				self.parseRtspReply(reply.decode("utf-8"))
+				# nếu là describe thì ko cần parser in thẳng ra
+				if(self.requestSent == self.DESCRIBE):
+					print("\nServer reply:\n" + reply.decode("utf-8"))
+				else:
+					self.parseRtspReply(reply.decode("utf-8"))
 			
 			# Close the RTSP socket upon requesting Teardown
 			if self.requestSent == self.TEARDOWN:
